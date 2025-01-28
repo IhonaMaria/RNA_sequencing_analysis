@@ -7,6 +7,8 @@ Moreover, there is an information matrix that matches each sample with the condi
 
 In order to replicate the study, you only need to use Rstudio and download both txt files and Rmarkdown file. 
 
+The code contains basic visualization steps (PCA, correlation matrix, etc), a differential expression analysis and an enrichment analysis.
+
 ### Results and conclusions
 As a summary, after the sequencing and transcriptomics analysis, it has been found that:
 
