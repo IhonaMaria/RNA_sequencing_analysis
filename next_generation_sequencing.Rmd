@@ -1,0 +1,1486 @@
+---
+title: "Next generation sequencing"
+author: "Ihona Maria Correa de Cabo"
+date: "2024-12-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The first step is to load the necessary libraries:
+
+
+```{r message=FALSE, warning=FALSE}
+
+library(readr) # Read data files    
+library(dplyr) # Manipulation tasks (filtering, selecting, summarizing)     
+library(tibble) # Ensures compatibility with tidyverse tools    
+library(ggplot2) # Used for plotting
+library(DESeq2)  # Perform DEA
+library(BiocParallel) # Used for parallel computing
+library(EDASeq) # Exploratory data analysis tools for RNA-Seq data
+library(clusterProfiler) # Facilitates enrichment analysis
+library(enrichplot) # Visualization tools for enrichment analysis
+library(pheatmap)  # Correlation matrix plot
+library(ggfortify) # PCA autoplot
+library(corrplot)  # Plot correlation matrix
+
+```
+
+The packages to install come either from CRAN (The Comprehensive R Archive Network) or from Bioconductor. 
+
+The CRAN packages are straightforward and can be installed like this: 
+
+```{r message=FALSE, warning=FALSE}
+# Install CRAN packages
+install.packages("readr")
+```
+
+Bioconductor packages are installed using the BiocManager package, which first we need to install:
+
+```{r message=FALSE, warning=FALSE}
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+```
+
+Afterwards, it is possible to install the Bioconductor packages:
+
+```{r message=FALSE, warning=FALSE}
+
+# Install Bioconductor packages
+BiocManager::install("DESeq2")
+```
+
+
+
+# EXERCISE 2
+
+### Import both the count matrix and the sample information in R, format both of them to be used for downstream analysis and plot the PCA and correlation matrix.
+
+First we load the necessary libraries and the .txt files we need to complete the exercises. 
+
+
+```{r}
+# Load the metadata
+metadata <- read.delim("C:/Users/IhonaCorrea/Desktop/MASTER/COTM/Activity_2/sample_metadata.txt", header = TRUE, sep = "\t")
+
+```
+
+```{r}
+metadata
+```
+
+
+```{r}
+# Load the counts file
+counts <- read.delim("C:/Users/IhonaCorrea/Desktop/MASTER/COTM/Activity_2/GSE60450_Lactation-GenewiseCounts.txt", header = TRUE, sep = "\t")
+
+```
+
+```{r}
+head(counts)
+```
+
+Let's check if the metadata is aligned with the counts matrix:
+
+```{r}
+counts_columns <- colnames(counts)[-c(1, 2)] # Exclude the first two columns that aren't samples
+```
+
+
+```{r}
+counts_columns
+```
+Let's confirm that the metadata is aligend with the counts matrix:
+
+```{r}
+all(counts_columns == metadata$FileName) # Should return TRUE
+```
+
+
+#### Correlation matrix
+
+```{r}
+corMatrix <- cor(counts[-c(1, 2)], use="c")
+```
+
+
+```{r}
+# Keep only the sample name (first 7 digits) for better visualization
+colnames(corMatrix) <- substr(colnames(corMatrix), 1, 7) 
+rownames(corMatrix) <- substr(rownames(corMatrix), 1, 7)
+```
+
+```{r}
+head(corMatrix)
+```
+```{r}
+pheatmap(corMatrix)   
+```
+Now we will build the same correlation matrix but differenciating between the 3 status (virgin, pregnant and lactate)
+
+```{r}
+ metadata$FileName <- colnames(corMatrix)
+```
+
+
+```{r}
+# Ensure the row names of metadata match the column names of corMatrix
+
+rownames(metadata) <- metadata$FileName # Set row names to the sample names
+metadata <- metadata[, "Status", drop = FALSE] # Keep only the Status column
+```
+
+```{r}
+all(rownames(metadata) == colnames(corMatrix))
+```
+```{r}
+library(pheatmap)
+
+# Plot the correlation matrix with annotation
+pheatmap(
+  corMatrix,
+  main = "Correlation Heatmap by Status",
+  annotation_col = metadata, # Add Status annotation
+  show_rownames = FALSE,     # Hide row names for readability
+  fontsize_col = 8,         
+  angle_col = 45             
+)
+
+```
+The following correlation plot contains the correlation coefficients as white numbers:
+
+
+```{r}
+corrplot(corMatrix, order = 'hclust', 
+         addrect = 2, addCoef.col = 'white', 
+         number.cex = 0.7) 
+```
+It is possible to observe higher correlations among samples from the same status.
+
+
+#### PCA
+
+Before obtaining the PCA, it is necessary to transpose the counts matrix.
+
+```{r}
+transposed_matrix <- t(counts[-c(1, 2)]) # Transpose the matrix
+
+transposed_matrix <- log2(transposed_matrix + 1) # Transform the counts to log2 scale 
+
+pcaResults <- prcomp(transposed_matrix) # Obtain PCA 
+
+```
+
+
+```{r}
+#Plot PCA results
+autoplot(pcaResults, data = metadata, colour = 'Status')+
+    ggtitle("PCA plot")+
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r}
+summary(pcaResults)
+```
+
+
+
+# EXERCISE 3
+
+
+### Perform a differential expression analysis (DEA) between virgin and pregnant mice, assuming as reference samples from virgin. Depict a volcano plot showing gene symbol and distinguishing UP- and DOWN-regulated genes.
+
+
+### 1. Prepare the data
+
+First of all we filter the metadata to keep only those samples that correspond to virgin and pregnant mice. 
+
+```{r}
+metadata <- read.delim("C:/Users/IhonaCorrea/Desktop/MASTER/COTM/Activity_2/sample_metadata.txt", header = TRUE, sep = "\t")
+```
+
+
+```{r}
+subSamplInfo <- metadata[metadata$Status %in% c("virgin", "pregnant"), ]
+```
+
+We get the file names from the sub sampled metadata and we use them to obtain the columns from the counts matrix that match with that row names. By doing this, we are filtering the counts matrix to keep only samples from virgin and pregnant mice too. 
+
+
+```{r}
+# Get the column names from counts excluding the first two columns
+counts_columns <- colnames(counts)[-c(1, 2)] 
+
+# Get the filenames from subSamplInfo
+subsampl_files <- subSamplInfo$FileName
+
+# Find the intersection of counts columns and filenames
+matching_columns <- intersect(counts_columns, subsampl_files)
+
+```
+
+```{r}
+subCOUNTS <- counts[, colnames(counts) %in% matching_columns] # Not include the first 2 columns
+```
+
+```{r}
+rownames(subCOUNTS) <- counts$EntrezGeneID  # Set EntrezGeneID as row names
+```
+
+```{r}
+head(subCOUNTS, n=3)
+```
+
+Before constructing the DESeqDataset object, wee need to ensure that the row names from the metadata (subsampl_files) match and are in the same order as the column names from subCOUNTS ( the filtered counts matrix). 
+
+```{r}
+all(colnames(subCOUNTS) == subsampl_files) # has to be TRUE
+```
+Also, we ensure that the Status, which is the column differenciating between virgin and pregnant mice, is treated as a factor. 
+
+
+```{r}
+subSamplInfo$Status <- as.factor(subSamplInfo$Status)
+```
+
+### 2. Construct DESeqDataset object
+
+```{r}
+# construct object
+dds <- DESeqDataSetFromMatrix(
+  countData = subCOUNTS, 
+  colData = subSamplInfo, 
+  design = ~ Status
+)
+```
+
+```{r}
+print(dds)
+```
+Certain functions can be used to access this information separately: rownames(dds), colnames(dds), counts(dds) and colData(dds).
+
+```{r}
+colData(dds) # Example on how to access the information of the dds object
+```
+
+### 3. Pre-filtering
+
+Next, we will remove genes that have almost no information in any sample.
+
+
+```{r}
+dds <- dds[ rowSums(DESeq2::counts(dds)) > 3, ]
+
+# We set the factor level to virgin mice
+dds$Status <- relevel(dds$Status , ref = "virgin")
+```
+
+
+### 4. Run DESeq
+
+```{r warning=FALSE}
+
+library(BiocParallel)
+
+param <- MulticoreParam()
+
+register(param)
+
+```
+
+```{r message=FALSE, warning=FALSE}
+dds <- DESeq(dds, parallel = T)
+DEresults<- results(dds)
+```
+
+```{r}
+DEresults <- DEresults[order(DEresults$pvalue),] #sort results by increasing p-value
+```
+
+```{r}
+DEresults
+```
+
+### 5. Diagnostic plots
+
+This MA plot is useful to observe if the data normalization worked well. Most points are expected to be on the horizontal 0 line, since most genes are not expected to be differentially expressed.
+
+```{r}
+# MA plot
+DESeq2::plotMA(object = dds, ylim = c(-5, 5), main = "MA plot virgin-pregnant")
+```
+For the p-value distribution, we expect to see a peak around low p-values and a uniform distribution at P-values above 0.1.
+
+```{r warning=FALSE}
+# P-value distribution
+
+ggplot(data = as.data.frame(DEresults), aes(x = pvalue)) + 
+  geom_histogram(bins = 100)+
+  ggtitle("p-value distribution virgin-pregnant") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+# PCA plot
+
+rld <- rlog(dds)
+DESeq2::plotPCA(rld, ntop = 500, intgroup = 'Status') + 
+  ylim(-50, 50) + theme_bw()+
+  ggtitle("PCA plot virgin-pregnant")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+### 6. Visualization
+
+```{r}
+library(org.Mm.eg.db) # Genome wide annotation for mice 
+```
+
+```{r}
+# Save the DEG results in a dataframe
+DEG.vir.preg <- data.frame(DEresults$log2FoldChange, DEresults$lfcSE, DEresults$pvalue, 
+                           DEresults$padj, rownames(DEresults)) %>%   `colnames<-`(c('log2FoldChange', 'lfcSE', 'pvalue', 'padj', 'EntrezGeneID'))
+
+
+```
+
+
+
+```{r}
+# Map the EntrezGeneID column to a reference mice database
+
+DEG.vir.preg$GenSymbl<-mapIds(org.Mm.eg.db,keys=DEG.vir.preg$EntrezGeneID,column="SYMBOL", 
+                              keytype="ENTREZID", multiVals="first") 
+
+```
+
+```{r}
+head(DEG.vir.preg)
+```
+
+#### Volcano plot
+
+
+The significantly differentially expressed genes are the ones found in the upper-left and upper-right corners. We are going to add a column to the data frame (named diffexpressed) to specify if they are UP- or DOWN- regulated (which depends if log2FoldChange is positive or negative).
+
+```{r}
+# Set the thesholds for being up or down regulated
+F2CLim <- 2
+PadjLim <- 0.05
+```
+
+A log2 fold change of 2 corresponds to a 4-fold increase in gene expression, which can be considered a substantial change that reflects meaningful biological shifts.
+Moreover, a p-value of 0.05 is a common accepted significance level. If the changes are below the 0.05 threshold, it means they are statistically significant and not due to random chance.  
+
+```{r}
+DEG.vir.preg$diffexpressed <- "NO" # First we categorized all genes into not differencially expressed
+
+# if log2Foldchange > F2CLim and Padj < PadjLim, set as "UP" 
+DEG.vir.preg$diffexpressed[DEG.vir.preg$log2FoldChange > F2CLim  & DEG.vir.preg$padj < PadjLim ] <- "UP"
+
+# if log2Foldchange < -F2CLim and Padj < PadjLim, set as "DOWN"
+DEG.vir.preg$diffexpressed[DEG.vir.preg$log2FoldChange < -F2CLim & DEG.vir.preg$padj < PadjLim] <- "DOWN"
+
+```
+
+Now we perform a Volcano plot and color-code it based on if the genes are up or down regulated:
+
+```{r warning=FALSE}
+
+p <- ggplot(data=DEG.vir.preg, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed)) + 
+  geom_point() + theme_minimal()
+
+
+p2 <- p + geom_vline(xintercept=c(-F2CLim, F2CLim), col="red") +
+        geom_hline(yintercept=-log10(PadjLim), col="red")
+
+## Change point color 
+
+p3 <- p2 + scale_color_manual(values=c("blue", "black", "red"))
+
+mycolors <- c("blue", "red", "black")
+names(mycolors) <- c("DOWN", "UP", "NO")
+p3 <- p2 + scale_colour_manual(values = mycolors)+
+          ggtitle("Volcano plot virgin-pregnant") +
+          theme(plot.title = element_text(hjust = 0.5))
+
+p3
+```
+
+Next, the same Volcano plot but with the names of the genes next to each point will be assessed:
+
+```{r warning=FALSE}
+# Create a new column "delabel" that contains the name of genes differentially expressed (NA in case they are not)
+DEG.vir.preg$delabel <- NA
+DEG.vir.preg$delabel[DEG.vir.preg$diffexpressed != "NO"] <- DEG.vir.preg$GenSymbl[DEG.vir.preg$diffexpressed != "NO"]
+
+#Organize the labels using the "ggrepel" package and the geom_text_repel() function
+
+library(ggrepel)
+
+ggplot(data=DEG.vir.preg, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed, label=delabel)) +
+        geom_point() + 
+        theme_minimal() +
+        geom_text_repel() +
+        scale_color_manual(values=c("blue", "black", "red")) +
+        geom_vline(xintercept=c(-F2CLim, F2CLim), col="red") +
+        geom_hline(yintercept=-log10(PadjLim), col="red")+
+        ggtitle("Volcano plot virgin-pregnant") +
+        theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+
+We save the results:
+
+```{r}
+UPR.vir.preg <- DEG.vir.preg[DEG.vir.preg$diffexpressed=="UP",]
+DWR.vir.preg <- DEG.vir.preg[DEG.vir.preg$diffexpressed=="DOWN",]
+```
+
+```{r}
+head(UPR.vir.preg, n=3)
+```
+
+
+
+
+# EXERCISE 4
+
+
+### Perform enrichment analysis of both UP- and DOWN-regulated genes and represent results for each ontology graphicall.
+
+First of all we retrieve the mouse genes from the reference library and we map them to our EntrezGeneID to ensure the IDs used in downstream analysis are valid and consistent with the genome annotation database. 
+
+```{r}
+# Define the universe genes for enrichment analysis
+df <- as.data.frame(org.Mm.egGO)
+go_gene_list <- unique(sort(df$gene_id))  # Mouse universe genes
+
+```
+
+```{r}
+head(df)
+```
+
+
+### DOWN-REGULATED
+
+```{r}
+# Obtain ENTREZ ID of the genes previously extracted 
+ent.Gene <- mapIds(
+  org.Mm.eg.db,                         
+  keys = DWR.vir.preg$EntrezGeneID,      
+  keytype = "ENTREZID",                  
+  column = "ENTREZID",                   
+  multiVals = "first"                    
+)
+```
+
+
+```{r}
+ego <- enrichGO(gene          = na.omit(ent.Gene),
+                universe      = go_gene_list,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "all",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.10,
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+
+head(ego)# Reference
+```
+
+```{r}
+## Remove redundent GO terms
+ego2 <- clusterProfiler::simplify(ego)
+```
+
+
+```{r}
+head(summary(ego2), n=3)
+
+```
+
+
+### Visualization of DOWN-REGULATED genes
+
+#### Dot plot
+
+```{r}
+ego@result$Description <- stringr::str_wrap(ego@result$Description, width = 100)
+
+# Dotplot with improved readability
+
+dotplot(ego, split = "ONTOLOGY", showCategory = 5) + # Create a dot plot of enriched terms from the ego object, displaying the top 5 
+  facet_grid(ONTOLOGY ~ ., scales = "free") + # splits the plot into facets for each ontology
+  ggtitle("Dotplot for DOWN-regulated genes") + 
+  theme(
+    panel.spacing = unit(1, "lines"), # Space between facets
+    axis.text.y = element_text( hjust = 1, size = 7), 
+    plot.title = element_text(hjust = 0.5) # Put title in the center
+  )
+```
+
+#### Gene concept network:
+
+```{r}
+cnetplot(ego2, showCategory = 3, foldChange = DWR.vir.preg$log2FoldChange, circular = TRUE, colorEdge = TRUE)
+```
+
+#### UpSet plot:
+
+```{r}
+p <- upsetplot(ego2, n = 5)
+
+p + scale_y_continuous(limits = c(0, 10), breaks = seq(0, 10, 2)) + 
+theme_minimal() + labs(y = "# Genes", x = "Intersect GOterms")+
+  ggtitle("Intersection of Top 5 GO Terms for DOWN-regulated") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### Tree plot:
+
+
+```{r}
+edox <- pairwise_termsim(ego)
+p1 <- treeplot(edox)
+p1 + ggtitle("Treeplot of Enriched Terms for DOWN-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+
+```
+
+
+```{r}
+p2 <- treeplot(edox, hclust_method = "average")
+p2 + ggtitle("Clustered Treeplot for DOWN-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+
+```
+
+
+### UP-REGULATED
+
+```{r}
+# Obtain ENTREZ ID of the genes previously extracted 
+ent.Gene <- mapIds(
+  org.Mm.eg.db,                         
+  keys = UPR.vir.preg$EntrezGeneID, # Specify up-regulated     
+  keytype = "ENTREZID",                  
+  column = "ENTREZID",                   
+  multiVals = "first"                    
+)
+```
+
+
+
+```{r}
+ego <- enrichGO(gene          = na.omit(ent.Gene),
+                universe      = go_gene_list,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "all",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.10,
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+
+head(ego)# Reference
+```
+
+
+```{r}
+## remove redundent GO terms
+ego2 <- clusterProfiler::simplify(ego)
+```
+
+
+```{r}
+head(summary(ego2), n=2)
+```
+
+### Visualization of UP-REGULATED genes
+
+#### Dot plot:
+
+```{r}
+ego@result$Description <- stringr::str_wrap(ego@result$Description, width = 100)
+
+# Dotplot with improved readability
+
+dotplot(ego, split = "ONTOLOGY", showCategory = 5) + # Create a dot plot of enriched terms from the ego object, displaying the top 5 
+  facet_grid(ONTOLOGY ~ ., scales = "free") + # splits the plot into facets for each ontology
+  ggtitle("Dotplot for UP-regulated genes") + 
+  theme(
+    panel.spacing = unit(1, "lines"), # Space between facets
+    axis.text.y = element_text( hjust = 1, size = 7), # Rotate y-axis labels
+    plot.title = element_text(hjust = 0.5) # Put title in the center
+  )
+```
+
+#### Gene concept network:
+
+```{r}
+cnetplot(ego2, showCategory = 3, foldChange = UPR.vir.preg$log2FoldChange, circular = TRUE, colorEdge = TRUE, max.overlaps = 100)
+```
+
+
+#### UpSet plot:
+
+```{r warning=FALSE}
+p <- upsetplot(ego2, n = 5)
+
+p + scale_y_continuous(limits = c(0, 10), breaks = seq(0, 10, 2)) + 
+theme_minimal() + labs(y = "# Genes", x = "Intersect GOterms")+
+            ggtitle("Intersection of Top 5 GO Terms for UP-regulated genes") +
+          theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### Tree plot:
+
+
+```{r}
+edox <- pairwise_termsim(ego)
+p1 <- treeplot(edox)
+p1 + ggtitle("Treeplot of Enriched Terms for UP-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+
+```
+
+
+```{r}
+p2 <- treeplot(edox, hclust_method = "average")
+p2 + ggtitle("Clustered Treeplot for UP-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+```
+
+
+
+# EXERCISE 6
+
+### Perform the same analyses as tasks 3, 4, and 5, but compare virgin and lactating mice.
+
+
+```{r}
+metadata <- read.delim("sample_metadata.txt", header = TRUE, sep = "\t") # Load metadata again
+```
+
+
+```{r}
+subSamplInfo <- metadata[metadata$Status %in% c("virgin", "lactate"), ] # Filter to virgin and lactating mice
+
+```
+
+
+```{r}
+# Get the column names from counts excluding the first two columns
+counts_columns <- colnames(counts)[-c(1, 2)] 
+
+# Get the filenames from subSamplInfo
+subsampl_files <- subSamplInfo$FileName
+
+# Find the intersection of counts columns and filenames
+matching_columns <- intersect(counts_columns, subsampl_files)
+
+```
+
+
+```{r}
+subCOUNTS <- counts[, colnames(counts) %in% matching_columns] # Not include the first 2 columns
+```
+
+```{r}
+rownames(subCOUNTS) <- counts$EntrezGeneID  # Set EntrezGeneID as row names
+```
+
+
+See if the rows of the metadata are aligned with the columns of the counts matrix:
+
+```{r}
+all(colnames(subCOUNTS) == subsampl_files) # has to be TRUE
+```
+
+
+```{r}
+subSamplInfo$Status <- as.factor(subSamplInfo$Status) # Status treated as a factor
+
+```
+
+
+
+### DEA virgin-lactate
+
+
+```{r}
+# construct a DESeqDataset object
+dds <- DESeqDataSetFromMatrix(
+  countData = subCOUNTS, 
+  colData = subSamplInfo, 
+  design = ~ Status
+)
+```
+
+
+
+```{r}
+
+# Pre-filtering
+dds <- dds[ rowSums(DESeq2::counts(dds)) > 3, ]
+
+# We set the factor level to virgin mice
+dds$Status <- relevel(dds$Status , ref = "virgin")
+```
+
+
+```{r warning=FALSE}
+# Run DESeq
+
+library(BiocParallel)
+
+param <- MulticoreParam()
+register(param)
+
+```
+
+```{r warning=FALSE}
+dds <- DESeq(dds, parallel = T)
+DEresults<- results(dds)
+```
+
+```{r}
+#sort results by increasing p-value
+DEresults <- DEresults[order(DEresults$pvalue),]
+```
+
+```{r}
+DEresults
+```
+
+Let's plot the diagnostic plots explained before:
+
+```{r}
+# MA plot
+DESeq2::plotMA(object = dds, ylim = c(-5, 5), main = "MA plot virgin-lactate")
+```
+
+```{r warning=FALSE}
+# P-value distribution
+ggplot(data = as.data.frame(DEresults), aes(x = pvalue)) + 
+  geom_histogram(bins = 100)+
+  ggtitle("p-vale distribution virgin-lactate") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+rld <- rlog(dds)
+DESeq2::plotPCA(rld, ntop = 500, intgroup = 'Status') + 
+  ylim(-50, 50) + theme_bw()+
+  ggtitle("PCA plot virgin-lactate")
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+
+#### Visualization:
+
+```{r}
+library(org.Mm.eg.db) # Genome wide annotation for mice 
+```
+
+```{r}
+DEG.vir.lact <- data.frame(DEresults$log2FoldChange, DEresults$lfcSE, DEresults$pvalue, 
+                           DEresults$padj, rownames(DEresults)) %>%   `colnames<-`(c('log2FoldChange', 'lfcSE', 'pvalue', 'padj', 'EntrezGeneID'))
+
+```
+
+
+
+```{r}
+DEG.vir.lact$GenSymbl<-mapIds(org.Mm.eg.db,keys=DEG.vir.lact$EntrezGeneID,column="SYMBOL", 
+                              keytype="ENTREZID", multiVals="first") 
+
+```
+
+
+```{r}
+head(DEG.vir.lact)
+```
+
+- Volcano plot:
+
+
+```{r}
+DEG.vir.lact$diffexpressed <- "NO"
+# if log2Foldchange > F2CLim and Padj < PadjLim, set as "UP" 
+DEG.vir.lact$diffexpressed[DEG.vir.lact$log2FoldChange > F2CLim  & DEG.vir.lact$padj < PadjLim ] <- "UP"
+# if log2Foldchange < -F2CLim and Padj < PadjLim, set as "DOWN"
+DEG.vir.lact$diffexpressed[DEG.vir.lact$log2FoldChange < -F2CLim & DEG.vir.lact$padj < PadjLim] <- "DOWN"
+
+```
+
+
+```{r}
+p <- ggplot(data=DEG.vir.preg, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed)) + 
+  geom_point() + theme_minimal()
+
+p2 <- p + geom_vline(xintercept=c(-F2CLim, F2CLim), col="red") +
+        geom_hline(yintercept=-log10(PadjLim), col="red")
+
+## Change point color 
+
+p3 <- p2 + scale_color_manual(values=c("blue", "black", "red"))
+
+mycolors <- c("blue", "red", "black")
+names(mycolors) <- c("DOWN", "UP", "NO")
+p3 <- p2 + scale_colour_manual(values = mycolors)+
+          ggtitle("Volcano plot virgin-lactate") +
+          theme(plot.title = element_text(hjust = 0.5))
+
+p3
+```
+
+
+
+```{r}
+# Plot with the name of genes beside the points
+
+# Create a new column "delabel"
+DEG.vir.lact$delabel <- NA
+DEG.vir.lact$delabel[DEG.vir.lact$diffexpressed != "NO"] <- DEG.vir.lact$GenSymbl[DEG.vir.lact$diffexpressed != "NO"]
+
+# Organize the labels using the "ggrepel" package and geom_text_repel() function
+
+library(ggrepel)
+
+ggplot(data=DEG.vir.lact, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed, label=delabel)) +
+        geom_point() + 
+        theme_minimal() +
+        geom_text_repel() +
+        scale_color_manual(values=c("blue", "black", "red")) +
+        geom_vline(xintercept=c(-F2CLim, F2CLim), col="red") +
+        geom_hline(yintercept=-log10(PadjLim), col="red") +
+        ggtitle("Volcano plot virgin-lactate") +
+        theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+Save the results:
+
+```{r}
+UPR.vir.lact <- DEG.vir.lact[DEG.vir.lact$diffexpressed=="UP",]
+DWR.vir.lact <- DEG.vir.lact[DEG.vir.lact$diffexpressed=="DOWN",]
+```
+
+
+### Enrichment analysis virgin-lactate
+
+```{r}
+# Define the universe genes for enrichment analysis
+df <- as.data.frame(org.Mm.egGO)
+go_gene_list <- unique(sort(df$gene_id))  # Mouse universe genes
+
+```
+
+#### DOWN-REGULATED
+
+```{r}
+# Obtain ENTREZ ID of the genes previously extracted 
+ent.Gene <- mapIds(
+  org.Mm.eg.db,                         
+  keys = DWR.vir.lact$EntrezGeneID,   # Down regulated Virgin-lactating   
+  keytype = "ENTREZID",                  
+  column = "ENTREZID",                   
+  multiVals = "first"                    
+)
+```
+
+```{r}
+ego <- enrichGO(gene          = na.omit(ent.Gene),
+                universe      = go_gene_list,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "all",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.10,
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+
+head(ego)# Reference
+```
+
+```{r}
+## remove redundent GO terms
+ego2 <- clusterProfiler::simplify(ego)
+```
+
+
+```{r}
+head(summary(ego2), n=2)
+
+```
+
+
+#### Visualization of DOWN-REGULATED genes
+
+Dot plot:
+
+```{r}
+ego@result$Description <- stringr::str_wrap(ego@result$Description, width = 100)
+
+# Dotplot with improved readability
+
+dotplot(ego, split = "ONTOLOGY", showCategory = 5) + # Create a dot plot of enriched terms from the ego object, displaying the top 5 
+  facet_grid(ONTOLOGY ~ ., scales = "free") + # splits the plot into facets for each ontology
+  ggtitle("Dotplot for DOWN-regulated genes") + 
+  theme(
+    panel.spacing = unit(1, "lines"), # Space between facets
+    axis.text.y = element_text( hjust = 1, size = 7), # Rotate y-axis labels
+    plot.title = element_text(hjust = 0.5) # Put title in the center
+  )
+```
+
+Gene concept network:
+
+```{r}
+cnetplot(ego2, showCategory = 3, foldChange = DWR.vir.lact$log2FoldChange, circular = TRUE, colorEdge = TRUE)
+```
+
+
+```{r warning=FALSE}
+p <- upsetplot(ego2, n = 5)
+
+p + scale_y_continuous(limits = c(0, 10), breaks = seq(0, 10, 2)) + 
+theme_minimal() + labs(y = "# Genes", x = "Intersect GOterms")+
+            ggtitle("Intersection of Top 5 GO Terms for DOWN-regulated genes") +
+          theme(plot.title = element_text(hjust = 0.5))
+```
+
+Tree plot:
+
+
+```{r}
+edox <- pairwise_termsim(ego)
+p1 <- treeplot(edox)
+p1 + ggtitle("Treeplot of Enriched Terms for DOWN-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+```
+
+
+```{r}
+p2 <- treeplot(edox, hclust_method = "average")
+p2 + ggtitle("Clustered Treeplot of Enriched Terms for DOWN-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+```
+
+
+
+### UP-REGULATED
+
+```{r}
+# Obtain ENTREZ ID of the genes previously extracted 
+ent.Gene <- mapIds(
+  org.Mm.eg.db,                         
+  keys = UPR.vir.lact$EntrezGeneID,      
+  keytype = "ENTREZID",                  
+  column = "ENTREZID",                   
+  multiVals = "first"                    
+)
+```
+
+```{r}
+ego <- enrichGO(gene          = na.omit(ent.Gene),
+                universe      = go_gene_list,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "all",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.10,
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+
+head(ego)# Reference
+```
+
+
+```{r}
+## remove redundent GO terms
+ego2 <- clusterProfiler::simplify(ego)
+```
+
+
+### Visualization of up-regulated genes
+
+Dot plot:
+
+```{r}
+ego@result$Description <- stringr::str_wrap(ego@result$Description, width = 100)
+
+# Dotplot with improved readability
+
+dotplot(ego, split = "ONTOLOGY", showCategory = 5) + # Create a dot plot of enriched terms from the ego object, displaying the top 5 
+  facet_grid(ONTOLOGY ~ ., scales = "free") + # splits the plot into facets for each ontology
+  ggtitle("Dotplot for UP-regulated genes") + 
+  theme(
+    panel.spacing = unit(1, "lines"), # Space between facets
+    axis.text.y = element_text( hjust = 1, size = 7), 
+    plot.title = element_text(hjust = 0.5) # Put title in the center
+  )
+```
+
+Gene concept network:
+
+```{r}
+cnetplot(ego2, showCategory = 3, foldChange = UPR.vir.lact$log2FoldChange, circular = TRUE, colorEdge = TRUE)
+```
+
+UpSet plot:
+
+```{r warning=FALSE}
+p <- upsetplot(ego2, n = 5)
+
+p + scale_y_continuous(limits = c(0, 10), breaks = seq(0, 10, 2)) + 
+theme_minimal() + labs(y = "# Genes", x = "Intersect GOterms")+
+
+    ggtitle("Intersection of Top 5 GO Terms for UP-regulated genes") +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+Tree plot:
+
+
+```{r}
+edox <- pairwise_termsim(ego)
+p1 <- treeplot(edox)
+p1 + ggtitle("Treeplot of Enriched Terms for UP-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+```
+
+
+```{r}
+p2 <- treeplot(edox, hclust_method = "average")
+p2 + ggtitle("Clustered Treeplot of Enriched Terms for UP-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+```
+
+
+# EXERCISE 7
+
+### Perform the same analyses as tasks 3, 4, and 5, but compare pregnant and lactating mice 
+
+```{r}
+metadata <- read.delim("sample_metadata.txt", header = TRUE, sep = "\t") # Load again the metadata
+```
+
+
+```{r}
+subSamplInfo <- metadata[metadata$Status %in% c("pregnant", "lactate"), ] # Filter for pregnant and lactate mice
+
+```
+
+
+```{r}
+# Get the column names from counts excluding the first two columns
+counts_columns <- colnames(counts)[-c(1, 2)] 
+
+# Get the filenames from subSamplInfo
+subsampl_files <- subSamplInfo$FileName
+
+# Find the intersection of counts columns and filenames
+matching_columns <- intersect(counts_columns, subsampl_files)
+
+```
+
+
+```{r}
+subCOUNTS <- counts[, colnames(counts) %in% matching_columns] # Not include the first 2 columns
+```
+
+```{r}
+rownames(subCOUNTS) <- counts$EntrezGeneID  # Set EntrezGeneID as row names
+```
+
+See if the rows of the metadata are aligned with the columns of the counts matrix:
+
+```{r}
+all(colnames(subCOUNTS) == subsampl_files) # has to be TRUE
+```
+
+```{r}
+subSamplInfo$Status <- as.factor(subSamplInfo$Status) # Status treated as a factor
+
+```
+
+
+### DEA pregnant -lactate
+
+
+```{r}
+# construct a DESeqDataset object
+dds <- DESeqDataSetFromMatrix(
+  countData = subCOUNTS, 
+  colData = subSamplInfo, 
+  design = ~ Status
+)
+```
+
+
+```{r}
+
+# Pre-filtering
+
+dds <- dds[ rowSums(DESeq2::counts(dds)) > 3, ]
+
+# We set the factor level to pregnant mice in this case
+dds$Status <- relevel(dds$Status , ref = "pregnant")
+```
+
+
+```{r warning=FALSE}
+# Run DESeq
+
+library(BiocParallel)
+
+param <- MulticoreParam()
+
+register(param)
+
+```
+
+```{r warning=FALSE}
+dds <- DESeq(dds, parallel = T)
+DEresults<- results(dds)
+```
+
+```{r}
+#sort results by increasing p-value
+DEresults <- DEresults[order(DEresults$pvalue),]
+```
+
+```{r}
+DEresults
+```
+
+Let's plot the diagnostic plots:
+
+```{r}
+# MA plot
+DESeq2::plotMA(object = dds, ylim = c(-5, 5), main = "MA plot pregnant-lactate")
+```
+
+```{r warning=FALSE}
+# P-value distribution
+ggplot(data = as.data.frame(DEresults), aes(x = pvalue)) + 
+  geom_histogram(bins = 100)+
+  ggtitle("p-vale distribution pregnant-lactate") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+rld <- rlog(dds)
+DESeq2::plotPCA(rld, ntop = 500, intgroup = 'Status') + 
+  ylim(-50, 50) + theme_bw()+
+  ggtitle("PCA plot pregnant-lactate")
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+Visualization:
+
+```{r}
+library(org.Mm.eg.db) # Genome wide annotation for mice 
+```
+
+```{r}
+DEG.preg.lact <- data.frame(DEresults$log2FoldChange, DEresults$lfcSE, DEresults$pvalue, 
+                           DEresults$padj, rownames(DEresults)) %>%   `colnames<-`(c('log2FoldChange', 'lfcSE', 'pvalue', 'padj', 'EntrezGeneID'))
+
+
+```
+
+
+
+```{r}
+DEG.preg.lact$GenSymbl<-mapIds(org.Mm.eg.db,keys=DEG.preg.lact$EntrezGeneID,column="SYMBOL", 
+                              keytype="ENTREZID", multiVals="first") # 
+
+```
+
+
+```{r}
+head(DEG.preg.lact)
+```
+
+Volcano plot:
+
+
+```{r}
+DEG.preg.lact$diffexpressed <- "NO"
+# if log2Foldchange > F2CLim and Padj < PadjLim, set as "UP" 
+DEG.preg.lact$diffexpressed[DEG.preg.lact$log2FoldChange > F2CLim  & DEG.preg.lact$padj < PadjLim ] <- "UP"
+# if log2Foldchange < -F2CLim and Padj < PadjLim, set as "DOWN"
+DEG.preg.lact$diffexpressed[DEG.preg.lact$log2FoldChange < -F2CLim & DEG.preg.lact$padj < PadjLim] <- "DOWN"
+
+```
+
+
+```{r warning=FALSE}
+p <- ggplot(data=DEG.preg.lact, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed)) + 
+  geom_point() + theme_minimal()
+
+
+p2 <- p + geom_vline(xintercept=c(-F2CLim, F2CLim), col="red") +
+        geom_hline(yintercept=-log10(PadjLim), col="red")
+
+## Change point color 
+
+p3 <- p2 + scale_color_manual(values=c("blue", "black", "red"))
+
+mycolors <- c("blue", "red", "black")
+names(mycolors) <- c("DOWN", "UP", "NO")
+p3 <- p2 + scale_colour_manual(values = mycolors)+
+          ggtitle("Volcano plot pregnant-lactate") +
+          theme(plot.title = element_text(hjust = 0.5))
+
+p3
+```
+
+
+
+```{r warning=FALSE}
+# Write down the name of genes beside the points
+
+# Create a new column "delabel"
+DEG.preg.lact$delabel <- NA
+DEG.preg.lact$delabel[DEG.preg.lact$diffexpressed != "NO"] <- DEG.preg.lact$GenSymbl[DEG.preg.lact$diffexpressed != "NO"]
+
+# Organize the labels nicely using "ggrepel" package and geom_text_repel() function
+
+library(ggrepel)
+
+ggplot(data=DEG.preg.lact, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed, label=delabel)) +
+        geom_point() + 
+        theme_minimal() +
+        geom_text_repel() +
+        scale_color_manual(values=c("blue", "black", "red")) +
+        geom_vline(xintercept=c(-F2CLim, F2CLim), col="red") +
+        geom_hline(yintercept=-log10(PadjLim), col="red") +
+        ggtitle("Volcano plot pregnant-lactate") +
+        theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+Save the results:
+
+```{r}
+UPR.preg.lact <- DEG.preg.lact[DEG.preg.lact$diffexpressed=="UP",]
+DWR.preg.lact <- DEG.preg.lact[DEG.preg.lact$diffexpressed=="DOWN",]
+```
+
+
+### Enrichment analysis pregnant-lactate
+
+```{r}
+# Define the universe genes for enrichment analysis
+df <- as.data.frame(org.Mm.egGO)
+go_gene_list <- unique(sort(df$gene_id))  # Mouse universe genes
+
+```
+
+#### DOWN-REGULATED
+
+```{r}
+# Obtain ENTREZ ID of the genes previously extracted 
+ent.Gene <- mapIds(
+  org.Mm.eg.db,                         
+  keys = DWR.preg.lact$EntrezGeneID, #down-regulated pregnant-lactate     
+  keytype = "ENTREZID",                  
+  column = "ENTREZID",                   
+  multiVals = "first"                    
+)
+```
+
+```{r}
+ego <- enrichGO(gene          = na.omit(ent.Gene),
+                universe      = go_gene_list,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "all",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.10,
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+
+head(ego)# Reference
+```
+
+```{r}
+## remove redundent GO terms
+ego2 <- clusterProfiler::simplify(ego)
+```
+
+
+#### Visualization of DOWN-REGULATED genes
+
+Dot plot:
+
+```{r}
+ego@result$Description <- stringr::str_wrap(ego@result$Description, width = 100)
+
+# Dotplot with improved readability
+
+dotplot(ego, split = "ONTOLOGY", showCategory = 5) + # Create a dot plot of enriched terms from the ego object, displaying the top 5 
+  facet_grid(ONTOLOGY ~ ., scales = "free") + # splits the plot into facets for each ontology
+  ggtitle("Dotplot for DOWN-regulated genes") + 
+  theme(
+    panel.spacing = unit(1, "lines"), # Space between facets
+    axis.text.y = element_text( hjust = 1, size = 7), # Rotate y-axis labels
+    plot.title = element_text(hjust = 0.5) # Put title in the center
+  )
+```
+
+Gene concept network:
+
+```{r}
+cnetplot(ego2, showCategory = 3, foldChange = DWR.preg.lact$log2FoldChange, circular = TRUE, colorEdge = TRUE)
+```
+
+UpSet plot:
+
+```{r}
+p <- upsetplot(ego2, n = 5)
+
+p + scale_y_continuous(limits = c(0, 10), breaks = seq(0, 10, 2)) + 
+theme_minimal() + labs(y = "# Genes", x = "Intersect GOterms")+
+            ggtitle("Intersection of Top 5 GO Terms for DOWN-regulated") +
+          theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+Tree plot:
+
+
+```{r}
+edox <- pairwise_termsim(ego)
+p1 <- treeplot(edox)
+p1 + ggtitle("Treeplot of Enriched Terms for DOWN-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+```
+
+
+```{r}
+p2 <- treeplot(edox, hclust_method = "average")
+p2 + ggtitle("Clustered Treeplot of Enriched Terms for DOWN-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+```
+
+
+### UP-REGULATED
+
+```{r}
+# Obtain ENTREZ ID of the genes previously extracted 
+ent.Gene <- mapIds(
+  org.Mm.eg.db,                         
+  keys = UPR.preg.lact$EntrezGeneID, #UP-regulated pregnant-lactate     
+  keytype = "ENTREZID",                  
+  column = "ENTREZID",                   
+  multiVals = "first"                    
+)
+```
+
+```{r}
+ego <- enrichGO(gene          = na.omit(ent.Gene),
+                universe      = go_gene_list,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "all",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.10,
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
+
+head(ego)# Reference
+```
+
+
+```{r}
+## remove redundent GO terms
+ego2 <- clusterProfiler::simplify(ego)
+```
+
+
+
+### Visualization of UP-REGULATED genes
+
+Dot plot:
+
+```{r}
+ego@result$Description <- stringr::str_wrap(ego@result$Description, width = 100)
+
+# Dotplot with improved readability
+
+dotplot(ego, split = "ONTOLOGY", showCategory = 5) + # Create a dot plot of enriched terms from the ego object, displaying the top 5 
+  facet_grid(ONTOLOGY ~ ., scales = "free") + # splits the plot into facets for each ontology
+  ggtitle("Dotplot for UP-regulated genes") + 
+  theme(
+    panel.spacing = unit(1, "lines"), # Space between facets
+    axis.text.y = element_text( hjust = 1, size = 7), 
+    plot.title = element_text(hjust = 0.5) # Put title in the center
+  )
+```
+
+Gene concept network:
+
+```{r}
+cnetplot(ego2, showCategory = 3, foldChange = UPR.preg.lact$log2FoldChange, circular = TRUE, colorEdge = TRUE)
+```
+
+
+```{r}
+p <- upsetplot(ego2, n = 5)
+
+p + scale_y_continuous(limits = c(0, 10), breaks = seq(0, 10, 2)) + 
+theme_minimal() + labs(y = "# Genes", x = "Intersect GOterms")+
+
+    ggtitle("Intersection of Top GO Terms for UP-regulated genes") +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+Tree plot
+
+
+```{r}
+edox <- pairwise_termsim(ego)
+p1 <- treeplot(edox)
+p1 + ggtitle("Treeplot of Enriched Terms for UP-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+```
+
+
+```{r}
+p2 <- treeplot(edox, hclust_method = "average")
+p2 + ggtitle("Clustered Treeplot of Enriched Terms for UP-regulated genes") +
+  theme(
+    plot.title = element_text(hjust = 0.5) 
+  )
+```
